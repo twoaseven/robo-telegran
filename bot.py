@@ -19,7 +19,7 @@ CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")
 WHITELIST = [5336222205, 6593135327]
 
 def encurtar_link_bitly(url_longa: str) -> str:
-    """Encurta o link usando a API do Bitly e aplica o CTA ajustado."""
+    """Encurta o link usando a API do Bitly."""
     if not BITLY_TOKEN or not url_longa.startswith("http"):
         return url_longa
 
@@ -32,9 +32,7 @@ def encurtar_link_bitly(url_longa: str) -> str:
     try:
         response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
         if response.status_code in [200, 201]:
-            link_encurtado = response.json().get("link")
-            # Substitua abaixo o texto do CTA se quiser modificar as palavras da chamada
-            return f"👉 **CLIQUE AGORA PARA GARANTIR O SEU, E NAO FICAR SEM OFERTAS COMO ESSA É SÓ NO RADAR DO DESCONTO**\n🔗 {link_encurtado}"
+            return response.json().get("link")
     except Exception as e:
         logger.error(f"Erro ao encurtar link no Bitly: {e}")
     
@@ -77,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🔥 **Drika Híbrida Ativa!**\n\n"
-        "Envie a FOTO + COPY + LINK. O link sairá no início e no final do texto."
+        "Envie a FOTO + COPY + LINK. Link limpo no topo e CTA completo no rodapé."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,8 +110,8 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await message.reply_text(
         "⚙️ **Como deseja processar esta postagem?**\n\n"
-        "• **🤖 Usar IA:** Traduz (se necessário) e otimiza a copy.\n"
-        "• **⚡ Enviar Direto:** Traduz o texto, aplica o Bitly duplo (Início e Fim).",
+        "• **🤖 Usar IA:** Traduz e otimiza a copy.\n"
+        "• **⚡ Enviar Direto:** Traduz o texto e aplica o padrão topo/rodapé (Ultrarrápido).",
         reply_markup=reply_markup
     )
 
@@ -140,7 +138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Extrai link e traduz o restante do texto automaticamente para o português
         palavras = raw_text.split() if raw_text else []
         link_original = next((p for p in palavras if p.startswith("http")), "")
-        link_final = encurtar_link_bitly(link_original) if link_original else ""
+        link_curto = encurtar_link_bitly(link_original) if link_original else ""
         
         texto_sem_link = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
         texto_traduzido = traduzir_para_portugues(texto_sem_link)
@@ -152,9 +150,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass 
 
-        # Montagem com o link no INÍCIO e no FINAL, pulando linhas
-        if link_final:
-            legenda_final = f"{link_final}\n\n{texto_traduzido}\n\n{link_final}".strip()
+        # Montagem: Apenas o link limpo no topo, seguido da copy, e o CTA completo no rodapé
+        if link_curto:
+            cta_rodape = f"👉 **CLIQUE AGORA PARA GARANTIR O SEU, E NAO FICAR SEM OFERTAS COMO ESSA É SÓ NO RADAR DO DESCONTO**\n🔗 {link_curto}"
+            legenda_final = f"{link_curto}\n\n{texto_traduzido}\n\n{cta_rodape}".strip()
         else:
             legenda_final = texto_traduzido
 
