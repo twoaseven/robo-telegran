@@ -1,6 +1,8 @@
 import os
+import io
 import logging
 import requests
+from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from google import genai
@@ -12,7 +14,8 @@ logger = logging.getLogger(__name__)
 # Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755") # Grupo de Rascunho
+BITLY_TOKEN = os.getenv("BITLY_TOKEN")  # Token da API do Bitly
+CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")  # Grupo de Rascunho
 
 # Whitelist de Segurança (IDs autorizados)
 WHITELIST = [5336222205, 6593135327]  # Cabral e Jade
@@ -20,51 +23,110 @@ WHITELIST = [5336222205, 6593135327]  # Cabral e Jade
 # Inicialização do Cliente Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Dicionário temporário para guardar copys geradas aguardando aprovação
+# Dicionário temporário para guardar postagens
 pending_posts = {}
+
+def encurtar_link_bitly(url_longa: str) -> str:
+    """Encurta o link usando a API do Bitly e aplica um visual limpo."""
+    if not BITLY_TOKEN or not url_longa.startswith("http"):
+        return url_longa  # Retorna o original se não houver token ou link válido
+
+    headers = {
+        "Authorization": f"Bearer {BITLY_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    data = {"long_url": url_longa}
+    
+    try:
+        response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
+        if response.status_code in [200, 201]:
+            link_encurtado = response.json().get("link")
+            # Retorna o link encurtado envelopado em uma chamada magnética padrão
+            return f"👉 **[ CLIQUE AQUI PARA GARANTIR A OFERTA ]**\n🔗 {link_encurtado}"
+    except Exception as e:
+        logger.error(f"Erro ao encurtar link no Bitly: {e}")
+    
+    return url_longa
+
+SYSTEM_PROMPT = (
+    "Atue como um copywriter de elite especializado em canais de ofertas relâmpago, grupos VIP de promoções no Telegram e WhatsApp. "
+    "Seu único objetivo é gerar uma copy curta, magnética e de ALTÍSSIMA CONVERSÃO que crie escassez imediata.\n\n"
+    "REGRAS OBRIGATÓRIAS:\n"
+    "1. Use gatilhos mentais agressivos de ESCASSEZ e URGÊNCIA (ex: 'Preço bugado', 'Últimas unidades', 'Corre antes que acabe').\n"
+    "2. Identifique o produto pela imagem/informações fornecidas e destaque o principal benefício em 1 ou 2 linhas.\n"
+    "3. Destaque o PREÇO promocional em negrito e caixa alta.\n"
+    "4. IMPORTANTE: Deixe um espaço limpo no final da copy ou use o marcador [LINK_AQUI] para onde o link será posicionado. Não invente URLs.\n"
+    "5. Use emojis estratégicos (🚨, 🔥, ⚡, 😱) sem poluir. Entregue APENAS o texto pronto."
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in WHITELIST:
-        await update.message.reply_text("⛔ Acesso restrito. Este robô é de uso exclusivo.")
+        await update.message.reply_text("⛔ Acesso restrito.")
         return
-    
+
     await update.message.reply_text(
-        "🤖 **Drika Ativa e Blindada!**\n\n"
-        "Envie o link do produto (Amazon, Shopee, Mercado Livre, etc.) "
-        "para eu gerar a copy de vendas estruturada."
+        "🔥 **Drika Multimodal + Bitly Ativa!**\n\n"
+        "Envie a **FOTO** com o preço e o link de afiliado na legenda. "
+        "O bot vai gerar a copy de escassez e camuflar o link automaticamente."
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in WHITELIST:
-        return  # Ignora mensagens de usuários de fora silenciosamente
-
-    text = update.message.text
-    if not text:
         return
 
-    await update.message.reply_text("⏳ Processando link e gerando copy...")
+    message = update.message
+    has_photo = bool(message.photo)
+    raw_text = message.caption if has_photo else message.text
+
+    if not has_photo and not raw_text:
+        return
+
+    status_msg = await message.reply_text("⚡ Processando imagem e encurtando link via Bitly...")
 
     try:
-        prompt = (
-            "Atue como especialista em copywriting de alta conversão para canais de ofertas no Telegram. "
-            "Crie uma copy persuasiva, limpa e estruturada para o seguinte link/produto:\n\n"
-            f"{text}\n\n"
-            "Inclua emojis estratégicos, destaque o preço se houver e deixe o espaço para o link de afiliado."
+        # Extração simples de link se houver no texto/legenda
+        palavras = raw_text.split() if raw_text else []
+        link_original = next((p for p in palavras if p.startswith("http")), "")
+        
+        # Encurta o link imediatamente via Bitly
+        link_final = encurtar_link_bitly(link_original) if link_original else ""
+
+        contents = []
+        photo_file_id = None
+
+        if has_photo:
+            photo_obj = message.photo[-1]
+            photo_file_id = photo_obj.file_id
+            tg_file = await context.bot.get_file(photo_file_id)
+            img_bytes = await tg_file.download_as_bytearray()
+            pil_image = Image.open(io.BytesIO(img_bytes))
+            contents.append(pil_image)
+
+        user_instruction = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"Informações enviadas pelo operador:\n{raw_text}\n\n"
+            f"Instrução de Link: Insira obrigatoriamente este bloco de chamada limpo no final da copy:\n{link_final}"
         )
+        contents.append(user_instruction)
 
         response = client.models.generate_content(
             model="gemini-3.8-flash",
-            contents=prompt,
+            contents=contents,
         )
-        copy_text = response.text
+        copy_text = response.text.strip()
 
-        # Armazena a copy temporariamente para envio posterior
-        post_id = str(update.message.message_id)
-        pending_posts[post_id] = copy_text
+        # Garante que o link encurtado apareça mesmo se a IA esquecer de colocar
+        if link_final and link_final not in copy_text:
+            copy_text += f"\n\n{link_final}"
 
-        # Cria botões de ação
+        post_id = str(message.message_id)
+        pending_posts[post_id] = {
+            "text": copy_text,
+            "photo_id": photo_file_id
+        }
+
         keyboard = [
             [
                 InlineKeyboardButton("🚀 Enviar para Rascunho", callback_data=f"send_{post_id}"),
@@ -73,19 +135,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
-            f"📝 **Copy Gerada com Sucesso:**\n\n{copy_text}",
-            reply_markup=reply_markup
-        )
+        await status_msg.delete()
+
+        if photo_file_id:
+            await message.reply_photo(photo=photo_file_id, caption=copy_text, reply_markup=reply_markup)
+        else:
+            await message.reply_text(text=copy_text, reply_markup=reply_markup)
 
     except Exception as e:
-        logger.error(f"Erro ao gerar copy: {e}")
-        await update.message.reply_text("❌ Ocorreu um erro ao gerar a copy com a IA.")
+        logger.error(f"Erro ao processar: {e}")
+        await status_msg.edit_text(f"❌ Erro ao gerar copy. Detalhe: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    
+
     if user_id not in WHITELIST:
         await query.answer("Acesso não autorizado.", show_alert=True)
         return
@@ -95,30 +159,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("send_"):
         post_id = data.split("_")[1]
-        copy_text = pending_posts.get(post_id)
+        post_data = pending_posts.get(post_id)
 
-        if copy_text:
+        if post_data:
             try:
-                # Envia direto para o Grupo Privado de Rascunho
-                await context.bot.send_message(chat_id=CANAL_DESTINO, text=copy_text)
-                await query.edit_message_text(text="✅ **Copy enviada com sucesso para o grupo de rascunho!**")
+                if post_data["photo_id"]:
+                    await context.bot.send_photo(chat_id=CANAL_DESTINO, photo=post_data["photo_id"], caption=post_data["text"])
+                    await query.edit_message_caption(caption=f"{post_data['text']}\n\n✅ **Enviado para o Rascunho!**")
+                else:
+                    await context.bot.send_message(chat_id=CANAL_DESTINO, text=post_data["text"])
+                    await query.edit_message_text(text=f"{post_data['text']}\n\n✅ **Enviado para o Rascunho!**")
+                
+                del pending_posts[post_id]
             except Exception as e:
                 logger.error(f"Erro ao enviar para o canal: {e}")
-                await query.edit_message_text(text="❌ Erro ao enviar para o canal de destino.")
+                await query.message.reply_text("❌ Erro ao enviar para o grupo de rascunho.")
         else:
-            await query.edit_message_text(text="⚠️ Esta copy expirou ou já foi processada.")
+            await query.message.reply_text("⚠️ Esta postagem expirou.")
 
     elif data.startswith("cancel_"):
-        await query.edit_message_text(text="❌ **Copy descartada.**")
+        post_id = data.split("_")[1]
+        if post_id in pending_posts:
+            del pending_posts[post_id]
+        if query.message.photo:
+            await query.edit_message_caption(caption="❌ **Postagem descartada.**")
+        else:
+            await query.edit_message_text(text="❌ **Postagem descartada.**")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, handle_input))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Executando via Webhook mapeado pelo Render
     PORT = int(os.environ.get("PORT", "10000"))
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
@@ -134,7 +208,5 @@ def main():
     else:
         application.run_polling()
 
-
 if __name__ == "__main__":
     main()
-    
