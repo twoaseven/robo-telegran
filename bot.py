@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-BITLY_TOKEN = os.getenv("BITLY_TOKEN")  # Token da API do Bitly
+BITLY_TOKEN = os.getenv("BITLY_TOKEN")
 CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")  # Grupo de Rascunho
 
 # Whitelist de Segurança (IDs autorizados)
@@ -27,9 +27,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 pending_posts = {}
 
 def encurtar_link_bitly(url_longa: str) -> str:
-    """Encurta o link usando a API do Bitly e aplica um visual limpo."""
+    """Encurta o link usando a API do Bitly e aplica o CTA limpo."""
     if not BITLY_TOKEN or not url_longa.startswith("http"):
-        return url_longa  # Retorna o original se não houver token ou link válido
+        return url_longa
 
     headers = {
         "Authorization": f"Bearer {BITLY_TOKEN}",
@@ -41,22 +41,20 @@ def encurtar_link_bitly(url_longa: str) -> str:
         response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
         if response.status_code in [200, 201]:
             link_encurtado = response.json().get("link")
-            # Retorna o link encurtado envelopado em uma chamada magnética padrão
-            return f"👉 **[ CLIQUE AQUI PARA GARANTIR A OFERTA ]**\n🔗 {link_encurtado}"
+            return f"👉 **CLIQUE AQUI PARA GARANTIR A OFERTA**\n🔗 {link_encurtado}"
     except Exception as e:
         logger.error(f"Erro ao encurtar link no Bitly: {e}")
     
     return url_longa
 
 SYSTEM_PROMPT = (
-    "Atue como um copywriter de elite especializado em canais de ofertas relâmpago, grupos VIP de promoções no Telegram e WhatsApp. "
-    "Seu único objetivo é gerar uma copy curta, magnética e de ALTÍSSIMA CONVERSÃO que crie escassez imediata.\n\n"
-    "REGRAS OBRIGATÓRIAS:\n"
-    "1. Use gatilhos mentais agressivos de ESCASSEZ e URGÊNCIA (ex: 'Preço bugado', 'Últimas unidades', 'Corre antes que acabe').\n"
-    "2. Identifique o produto pela imagem/informações fornecidas e destaque o principal benefício em 1 ou 2 linhas.\n"
-    "3. Destaque o PREÇO promocional em negrito e caixa alta.\n"
-    "4. IMPORTANTE: Deixe um espaço limpo no final da copy ou use o marcador [LINK_AQUI] para onde o link será posicionado. Não invente URLs.\n"
-    "5. Use emojis estratégicos (🚨, 🔥, ⚡, 😱) sem poluir. Entregue APENAS o texto pronto."
+    "Atue como um copywriter especialista em canais de ofertas relâmpago no Telegram e WhatsApp. "
+    "Sua missão é criar uma copy CURTA, magnética e de ALTÍSSIMA CONVERSÃO.\n\n"
+    "REGRAS:\n"
+    "1. Use gatilhos fortes de escassez e urgência (ex: 'Preço bugado', 'Últimas unidades', 'Corre antes que acabe').\n"
+    "2. Foque no benefício principal em no máximo 2 linhas curtas.\n"
+    "3. Destaque o PREÇO em negrito e caixa alta.\n"
+    "4. Seja direto, sem introduções e sem enrolação. Entregue apenas o texto pronto para a legenda."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,9 +64,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔥 **Drika Multimodal + Bitly Ativa!**\n\n"
-        "Envie a **FOTO** com o preço e o link de afiliado na legenda. "
-        "O bot vai gerar a copy de escassez e camuflar o link automaticamente."
+        "🔥 **Drika Ajustada e Pronta!**\n\n"
+        "Envie a **FOTO** com o preço e o link na legenda para gerar a copy enxuta com link do Bitly."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -83,14 +80,12 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_photo and not raw_text:
         return
 
-    status_msg = await message.reply_text("⚡ Processando imagem e encurtando link via Bitly...")
+    status_msg = await message.reply_text("⚡ Gerando copy e encurtando link...")
 
     try:
-        # Extração simples de link se houver no texto/legenda
+        # Extrai o link do texto/legenda para mandar pro Bitly
         palavras = raw_text.split() if raw_text else []
         link_original = next((p for p in palavras if p.startswith("http")), "")
-        
-        # Encurta o link imediatamente via Bitly
         link_final = encurtar_link_bitly(link_original) if link_original else ""
 
         contents = []
@@ -104,11 +99,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pil_image = Image.open(io.BytesIO(img_bytes))
             contents.append(pil_image)
 
-        user_instruction = (
-            f"{SYSTEM_PROMPT}\n\n"
-            f"Informações enviadas pelo operador:\n{raw_text}\n\n"
-            f"Instrução de Link: Insira obrigatoriamente este bloco de chamada limpo no final da copy:\n{link_final}"
-        )
+        user_instruction = f"{SYSTEM_PROMPT}\n\nDados da oferta fornecidos:\n{raw_text}"
         contents.append(user_instruction)
 
         response = client.models.generate_content(
@@ -117,13 +108,12 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         copy_text = response.text.strip()
 
-        # Garante que o link encurtado apareça mesmo se a IA esquecer de colocar
-        if link_final and link_final not in copy_text:
-            copy_text += f"\n\n{link_final}"
+        # Monta a legenda final unindo a copy da IA + o link encurtado limpo
+        legenda_final = f"{copy_text}\n\n{link_final}" if link_final else copy_text
 
         post_id = str(message.message_id)
         pending_posts[post_id] = {
-            "text": copy_text,
+            "text": legenda_final,
             "photo_id": photo_file_id
         }
 
@@ -138,13 +128,13 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.delete()
 
         if photo_file_id:
-            await message.reply_photo(photo=photo_file_id, caption=copy_text, reply_markup=reply_markup)
+            await message.reply_photo(photo=photo_file_id, caption=legenda_final, reply_markup=reply_markup)
         else:
-            await message.reply_text(text=copy_text, reply_markup=reply_markup)
+            await message.reply_text(text=legenda_final, reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Erro ao processar: {e}")
-        await status_msg.edit_text(f"❌ Erro ao gerar copy. Detalhe: {e}")
+        await status_msg.edit_text(f"❌ Erro ao processar. Detalhe: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
