@@ -1,6 +1,7 @@
 python-telegram-bot[webhooks]
 google-genai
 requests
+deep-translator
 pillow
 beautifulsoup4
 flask
