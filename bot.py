@@ -124,7 +124,7 @@ def main():
 
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.strip()}/{TELEGRAM_TOKEN}"
-        logger.info(o=f"Iniciando Webhook em: {webhook_url}")
+        logger.info(f"Iniciando Webhook em: {webhook_url}")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -133,6 +133,7 @@ def main():
         )
     else:
         application.run_polling()
+
 
 if __name__ == "__main__":
     main()
