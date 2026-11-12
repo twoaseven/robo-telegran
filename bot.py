@@ -11,13 +11,11 @@ logger = logging.getLogger(__name__)
 # Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BITLY_TOKEN = os.getenv("BITLY_TOKEN")
-CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")  # Grupo de Rascunho
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Opcional caso queira usar a IA nos horários livres
+CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")
 
-# Whitelist de Segurança (IDs autorizados)
-WHITELIST = [5336222205, 6593135327]  # Cabral e Jade
-
-# Dicionário temporário para guardar postagens pendentes
-pending_posts = {}
+# Whitelist de Segurança
+WHITELIST = [5336222205, 6593135327]
 
 def encurtar_link_bitly(url_longa: str) -> str:
     """Encurta o link usando a API do Bitly e aplica o CTA limpo."""
@@ -40,6 +38,23 @@ def encurtar_link_bitly(url_longa: str) -> str:
     
     return url_longa
 
+def processar_com_gemini(texto_base: str) -> str:
+    """Opcional: Processa a copy via Gemini se a chave estiver ativa e o usuário escolher."""
+    if not GEMINI_API_KEY:
+        return texto_base
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Melhore esta copy para alta conversão em vendas de afiliados, mantendo persuasiva e direta: {texto_base}"
+        )
+        if response and response.text:
+            return response.text
+    except Exception as e:
+        logger.error(f"Erro na IA do Gemini (Modo Opcional): {e}")
+    return texto_base
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in WHITELIST:
@@ -47,9 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔥 **Drika Modo Limpeza Ativa!**\n\n"
-        "Envie a **FOTO PRONTA** com o link na legenda. "
-        "Vou encurtar o link, mandar para o rascunho e **limpar o PV** assim que você aprovar."
+        "🔥 **Drika Híbrida Ativa!**\n\n"
+        "Envie a FOTO + COPY + LINK. Vou te dar a opção de usar a IA ou ir direto com o Bitly."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,45 +78,30 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_photo and not raw_text:
         return
 
-    try:
-        # Extrai o link do texto/legenda para mandar pro Bitly
-        palavras = raw_text.split() if raw_text else []
-        link_original = next((p for p in palavras if p.startswith("http")), "")
-        link_final = encurtar_link_bitly(link_original) if link_original else ""
+    # Guarda os dados brutos na sessão do usuário temporariamente
+    context.user_data['raw_input'] = {
+        "text": raw_text or "",
+        "photo_id": message.photo[-1].file_id if has_photo else None
+    }
 
-        # Remove o link longo original e adiciona o bloco limpo do Bitly
-        texto_limpo = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
-        
-        if link_final:
-            legenda_final = f"{texto_limpo}\n\n{link_final}".strip()
-        else:
-            legenda_final = texto_limpo
-
-        photo_file_id = message.photo[-1].file_id if has_photo else None
-
-        post_id = str(message.message_id)
-        pending_posts[post_id] = {
-            "text": legenda_final,
-            "photo_id": photo_file_id,
-            "chat_id": message.chat_id
-        }
-
-        keyboard = [
-            [
-                InlineKeyboardButton("🚀 Enviar para Rascunho", callback_data=f"send_{post_id}"),
-                InlineKeyboardButton("❌ Descartar", callback_data=f"cancel_{post_id}")
-            ]
+    # Menu interativo de escolha de processamento
+    keyboard = [
+        [
+            InlineKeyboardButton("🤖 Usar IA (Gemini)", callback_data="mode_ai"),
+            InlineKeyboardButton("⚡ Enviar Direto (Só Bitly)", callback_data="mode_direct")
+        ],
+        [
+            InlineKeyboardButton("❌ Descartar", callback_data="cancel_ok")
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        if photo_file_id:
-            await message.reply_photo(photo=photo_file_id, caption=legenda_final, reply_markup=reply_markup)
-        else:
-            await message.reply_text(text=legenda_final, reply_markup=reply_markup)
-
-    except Exception as e:
-        logger.error(f"Erro ao processar: {e}")
-        await message.reply_text(f"❌ Erro ao processar mensagem. Detalhe: {e}")
+    await message.reply_text(
+        "⚙️ **Como deseja processar esta postagem?**\n\n"
+        "• **🤖 Usar IA:** Gera copy otimizada (Cuidado com horários de pico).\n"
+        "• **⚡ Enviar Direto:** Apenas camufla o link via Bitly (Ultrarrápido e sem gargalo).",
+        reply_markup=reply_markup
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -114,36 +113,81 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     data = query.data
+    raw_data = context.user_data.get('raw_input')
 
-    if data.startswith("send_"):
-        post_id = data.split("_")[1]
-        post_data = pending_posts.get(post_id)
+    if data in ["mode_ai", "mode_direct"]:
+        if not raw_data:
+            await query.edit_message_text("⚠️ Dados expirados. Envie o post novamente.")
+            return
 
+        raw_text = raw_data["text"]
+        photo_id = raw_data["photo_id"]
+
+        # Extrai link e aplica Bitly
+        palavras = raw_text.split() if raw_text else []
+        link_original = next((p for p in palavras if p.startswith("http")), "")
+        link_final = encurtar_link_bitly(link_original) if link_original else ""
+        texto_limpo = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
+
+        # Se escolheu IA, processa a copy
+        if data == "mode_ai":
+            try:
+                texto_limpo = processar_com_gemini(texto_limpo)
+            except Exception:
+                pass # Se falhar a IA, mantém o texto original
+
+        if link_final:
+            legenda_final = f"{texto_limpo}\n\n{link_final}".strip()
+        else:
+            legenda_final = texto_limpo
+
+        # Salva o post final pronto para aprovação
+        context.user_data['pending_post'] = {
+            "text": legenda_final,
+            "photo_id": photo_id
+        }
+
+        # Botões de Aprovação Final
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Enviar para Rascunho", callback_data="send_ok"),
+                InlineKeyboardButton("❌ Descartar", callback_data="cancel_ok")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Apaga a mensagem de escolha anterior e envia o preview formatado
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        if photo_id:
+            await context.bot.send_photo(chat_id=user_id, photo=photo_id, caption=legenda_final, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=legenda_final, reply_markup=reply_markup)
+
+    elif data == "send_ok":
+        post_data = context.user_data.get('pending_post')
         if post_data:
             try:
-                # 1. Envia para o canal de rascunho oficial
+                # Envia para o canal de rascunho
                 if post_data["photo_id"]:
                     await context.bot.send_photo(chat_id=CANAL_DESTINO, photo=post_data["photo_id"], caption=post_data["text"])
                 else:
                     await context.bot.send_message(chat_id=CANAL_DESTINO, text=post_data["text"])
                 
-                # 2. Deleta a mensagem de preview do chat privado (PV) para manter o histórico limpo
+                # Deleta a mensagem do PV limpando o histórico
                 await query.message.delete()
-                
-                # Remove da memória temporária
-                del pending_posts[post_id]
+                context.user_data.clear()
             except Exception as e:
-                logger.error(f"Erro ao enviar para o canal ou apagar mensagem: {e}")
-                await query.message.reply_text("❌ Erro ao processar o envio para o rascunho.")
+                logger.error(f"Erro ao enviar para o canal: {e}")
+                await query.message.reply_text(f"❌ Erro ao enviar para o rascunho: {e}")
         else:
-            await query.message.reply_text("⚠️ Esta postagem expirou.")
+            await query.message.reply_text("⚠️ Postagem expirada.")
 
-    elif data.startswith("cancel_"):
-        post_id = data.split("_")[1]
-        if post_id in pending_posts:
-            del pending_posts[post_id]
-        
-        # Deleta a mensagem do PV se descartado também
+    elif data == "cancel_ok":
+        context.user_data.clear()
         try:
             await query.message.delete()
         except Exception:
@@ -161,7 +205,6 @@ def main():
 
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.strip()}/{TELEGRAM_TOKEN}"
-        logger.info(f"Iniciando Webhook em: {webhook_url}")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
