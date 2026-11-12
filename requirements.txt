@@ -1,5 +1,6 @@
 python-telegram-bot[webhooks]
 google-genai
 requests
+pillow
 beautifulsoup4
 flask
