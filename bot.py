@@ -33,7 +33,7 @@ def encurtar_link_bitly(url_longa: str) -> str:
         response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
         if response.status_code in [200, 201]:
             link_encurtado = response.json().get("link")
-            return f"👉 **CLIQUE AQUI PARA GARANTIR A OFERTA**\n🔗 {link_encurtado}"
+            return f"👉 **CLIQUE AGORA PARA GARANTIR O SEU, E NAO FICAR SEM! OFERTAS COMO ESSA É SÓ NO RADAR DO DESCONTO**\n🔗 {link_encurtado}"
     except Exception as e:
         logger.error(f"Erro ao encurtar link no Bitly: {e}")
     
