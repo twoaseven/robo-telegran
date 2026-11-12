@@ -1,136 +1,139 @@
 import os
 import logging
-import asyncio
 import requests
-from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from google import genai
 
-# --- CONFIGURAÇÕES DE AMBIENTE ---
+# Configuração de Logs
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CANAL_DESTINO = os.getenv("CANAL_DESTINO", "@RadarDo_Desconto")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") # URL gerada pelo Render
+CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755") # Grupo de Rascunho
 
-client_ai = genai.Client(api_key=GEMINI_API_KEY)
+# Whitelist de Segurança (IDs autorizados)
+WHITELIST = [5336222205, 6593135327]  # Cabral e Jade
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Inicialização do Cliente Gemini
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-app_flask = Flask(__name__)
-telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-temporario_copys = {}
+# Dicionário temporário para guardar copys geradas aguardando aprovação
+pending_posts = {}
 
-@app_flask.route('/')
-def home():
-    return "🤖 Robô do Radar do Desconto operando 100% grátis!"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in WHITELIST:
+        await update.message.reply_text("⛔ Acesso restrito. Este robô é de uso exclusivo.")
+        return
+    
+    await update.message.reply_text(
+        "🤖 **Drika Ativa e Blindada!**\n\n"
+        "Envie o link do produto (Amazon, Shopee, Mercado Livre, etc.) "
+        "para eu gerar a copy de vendas estruturada."
+    )
 
-@app_flask.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
-def webhook():
-    """Recebe as interações do Telegram em tempo real"""
-    json_update = request.get_json(force=True)
-    update = Update.de_json(json_update, telegram_app.bot)
-    asyncio.run(processar_atualizacao(update))
-    return "OK", 200
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in WHITELIST:
+        return  # Ignora mensagens de usuários de fora silenciosamente
 
-async def processar_atualizacao(update: Update):
-    # 1. Clique nos botões de aprovação
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        chat_id = query.message.chat_id
-        acao = query.data
-
-        if acao == "aprovar":
-            copy_pronta = temporario_copys.get(chat_id)
-            if not copy_pronta:
-                await query.edit_message_text("⚠️ Nenhuma copy pendente encontrada.")
-                return
-            try:
-                await telegram_app.bot.send_message(
-                    chat_id=CANAL_DESTINO,
-                    text=copy_pronta,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=False
-                )
-                await query.edit_message_text("🚀 **Postado com sucesso no canal do Telegram!**\n\n*(Já pode copiar e jogar no WhatsApp)*")
-            except Exception as e:
-                await query.edit_message_text(f"❌ Erro ao postar no canal: {str(e)}")
-
-        elif acao == "cancelar":
-            await query.edit_message_text("🗑️ Postagem descartada.")
-
-        if chat_id in temporario_copys:
-            del temporario_copys[chat_id]
+    text = update.message.text
+    if not text:
         return
 
-    # 2. Envio de link no chat privado
-    if update.message and update.message.text:
-        if update.effective_chat.type != "private":
-            return
+    await update.message.reply_text("⏳ Processando link e gerando copy...")
 
-        url_recebida = update.message.text
-        chat_id = update.effective_chat.id
+    try:
+        prompt = (
+            "Atue como especialista em copywriting de alta conversão para canais de ofertas no Telegram. "
+            "Crie uma copy persuasiva, limpa e estruturada para o seguinte link/produto:\n\n"
+            f"{text}\n\n"
+            "Inclua emojis estratégicos, destaque o preço se houver e deixe o espaço para o link de afiliado."
+        )
 
-        if not url_recebida.startswith("http"):
-            await update.message.reply_text("⚠️ Envie um link válido de produto (Shopee ou Mercado Livre).")
-            return
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        copy_text = response.text
 
-        mensagem_aguarde = await update.message.reply_text("🔍 Analisando produto e gerando copy de vendas com IA...")
+        # Armazena a copy temporariamente para envio posterior
+        post_id = str(update.message.message_id)
+        pending_posts[post_id] = copy_text
 
-        try:
-            prompt = f"""
-            Você é um especialista em vendas de afiliados para Telegram e WhatsApp.
-            Com base neste link de produto: {url_recebida}
-            Crie uma postagem altamente persuasiva contendo:
-            1. Título chamativo com emojis.
-            2. Indicação de preço/desconto atraente.
-            3. Chamada para ação (CTA) para garantir no link.
-            4. O link de afiliado fornecido ({url_recebida}) colado no final.
-            Mantenha limpo, usando negrito (*texto*) e emojis. Não invente valores absurdos, foque em estruturar o texto perfeitamente.
-            """
-
-            response = client_ai.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-            )
-
-            copy_gerada = response.text
-            temporario_copys[chat_id] = copy_gerada
-
-            teclado = [
-                [
-                    InlineKeyboardButton("✅ Aprovar e Postar no Canal", callback_data="aprovar"),
-                    InlineKeyboardButton("❌ Descartar", callback_data="cancelar")
-                ]
+        # Cria botões de ação
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Enviar para Rascunho", callback_data=f"send_{post_id}"),
+                InlineKeyboardButton("❌ Descartar", callback_data=f"cancel_{post_id}")
             ]
-            reply_markup = InlineKeyboardMarkup(teclado)
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await telegram_app.bot.delete_message(chat_id=chat_id, message_id=mensagem_aguarde.message_id)
-            await update.message.reply_text(
-                text=f"📋 **PRÉVIA DA POSTAGEM:**\n\n{copy_gerada}\n\n*O que deseja fazer?*",
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
+        await update.message.reply_text(
+            f"📝 **Copy Gerada com Sucesso:**\n\n{copy_text}",
+            reply_markup=reply_markup
+        )
 
-        except Exception as e:
-            await update.message.reply_text(f"❌ Erro ao processar com a IA: {str(e)}")
+    except Exception as e:
+        logger.error(f"Erro ao gerar copy: {e}")
+        await update.message.reply_text("❌ Ocorreu um erro ao gerar a copy com a IA.")
 
-def registrar_webhook_telegram():
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id not in WHITELIST:
+        await query.answer("Acesso não autorizado.", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data.startswith("send_"):
+        post_id = data.split("_")[1]
+        copy_text = pending_posts.get(post_id)
+
+        if copy_text:
+            try:
+                # Envia direto para o Grupo Privado de Rascunho
+                await context.bot.send_message(chat_id=CANAL_DESTINO, text=copy_text)
+                await query.edit_message_text(text="✅ **Copy enviada com sucesso para o grupo de rascunho!**")
+            except Exception as e:
+                logger.error(f"Erro ao enviar para o canal: {e}")
+                await query.edit_message_text(text="❌ Erro ao enviar para o canal de destino.")
+        else:
+            await query.edit_message_text(text="⚠️ Esta copy expirou ou já foi processada.")
+
+    elif data.startswith("cancel_"):
+        await query.edit_message_text(text="❌ **Copy descartada.**")
+
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Executando via Webhook mapeado pelo Render
+    PORT = int(os.environ.get("PORT", "10000"))
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
     if RENDER_EXTERNAL_URL:
-        webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
-        url_api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
-        try:
-            r = requests.get(url_api)
-            print(f"Webhook configurado: {r.text}")
-        except Exception as e:
-            print(f"Erro ao registrar webhook: {e}")
+        webhook_url = f"{RENDER_EXTERNAL_URL.strip()}/{TELEGRAM_TOKEN}"
+        logger.info(o=f"Iniciando Webhook em: {webhook_url}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=webhook_url
+        )
+    else:
+        application.run_polling()
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    registrar_webhook_telegram()
-    app_flask.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    main()
     
