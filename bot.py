@@ -19,7 +19,7 @@ CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")
 WHITELIST = [5336222205, 6593135327]
 
 def encurtar_link_bitly(url_longa: str) -> str:
-    """Encurta o link usando a API do Bitly e aplica o CTA limpo."""
+    """Encurta o link usando a API do Bitly e aplica o CTA ajustado."""
     if not BITLY_TOKEN or not url_longa.startswith("http"):
         return url_longa
 
@@ -33,6 +33,7 @@ def encurtar_link_bitly(url_longa: str) -> str:
         response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
         if response.status_code in [200, 201]:
             link_encurtado = response.json().get("link")
+            # Substitua abaixo o texto do CTA se quiser modificar as palavras da chamada
             return f"👉 **CLIQUE AGORA PARA GARANTIR O SEU, E NAO FICAR SEM OFERTAS COMO ESSA É SÓ NO RADAR DO DESCONTO**\n🔗 {link_encurtado}"
     except Exception as e:
         logger.error(f"Erro ao encurtar link no Bitly: {e}")
@@ -75,8 +76,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔥 **Drika Híbrida & Tradutora Ativa!**\n\n"
-        "Envie a FOTO + COPY + LINK. Textos em inglês serão traduzidos automaticamente."
+        "🔥 **Drika Híbrida Ativa!**\n\n"
+        "Envie a FOTO + COPY + LINK. O link sairá no início e no final do texto."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +113,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(
         "⚙️ **Como deseja processar esta postagem?**\n\n"
         "• **🤖 Usar IA:** Traduz (se necessário) e otimiza a copy.\n"
-        "• **⚡ Enviar Direto:** Traduz o texto, aplica o Bitly direto (Ultrarrápido).",
+        "• **⚡ Enviar Direto:** Traduz o texto, aplica o Bitly duplo (Início e Fim).",
         reply_markup=reply_markup
     )
 
@@ -151,8 +152,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass 
 
+        # Montagem com o link no INÍCIO e no FINAL, pulando linhas
         if link_final:
-            legenda_final = f"{texto_traduzido}\n\n{link_final}".strip()
+            legenda_final = f"{link_final}\n\n{texto_traduzido}\n\n{link_final}".strip()
         else:
             legenda_final = texto_traduzido
 
