@@ -3,6 +3,7 @@ import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from deep_translator import GoogleTranslator
 
 # Configuração de Logs
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BITLY_TOKEN = os.getenv("BITLY_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Opcional caso queira usar a IA nos horários livres
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")
 
 # Whitelist de Segurança
@@ -38,6 +39,18 @@ def encurtar_link_bitly(url_longa: str) -> str:
     
     return url_longa
 
+def traduzir_para_portugues(texto: str) -> str:
+    """Traduz automaticamente qualquer texto em inglês para o português."""
+    if not texto.strip():
+        return texto
+    try:
+        tradutor = GoogleTranslator(source='auto', target='pt')
+        texto_traduzido = tradutor.translate(texto)
+        return texto_traduzido if texto_traduzido else texto
+    except Exception as e:
+        logger.error(f"Erro ao traduzir texto: {e}")
+        return texto
+
 def processar_com_gemini(texto_base: str) -> str:
     """Opcional: Processa a copy via Gemini se a chave estiver ativa e o usuário escolher."""
     if not GEMINI_API_KEY:
@@ -62,8 +75,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔥 **Drika Híbrida Ativa!**\n\n"
-        "Envie a FOTO + COPY + LINK. Vou te dar a opção de usar a IA ou ir direto com o Bitly."
+        "🔥 **Drika Híbrida & Tradutora Ativa!**\n\n"
+        "Envie a FOTO + COPY + LINK. Textos em inglês serão traduzidos automaticamente."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,7 +101,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton("🤖 Usar IA (Gemini)", callback_data="mode_ai"),
-            InlineKeyboardButton("⚡ Enviar Direto (Só Bitly)", callback_data="mode_direct")
+            InlineKeyboardButton("⚡ Enviar Direto (Tradução + Bitly)", callback_data="mode_direct")
         ],
         [
             InlineKeyboardButton("❌ Descartar", callback_data="cancel_ok")
@@ -98,8 +111,8 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await message.reply_text(
         "⚙️ **Como deseja processar esta postagem?**\n\n"
-        "• **🤖 Usar IA:** Gera copy otimizada (Cuidado com horários de pico).\n"
-        "• **⚡ Enviar Direto:** Apenas camufla o link via Bitly (Ultrarrápido e sem gargalo).",
+        "• **🤖 Usar IA:** Traduz (se necessário) e otimiza a copy.\n"
+        "• **⚡ Enviar Direto:** Traduz o texto, aplica o Bitly direto (Ultrarrápido).",
         reply_markup=reply_markup
     )
 
@@ -123,23 +136,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_text = raw_data["text"]
         photo_id = raw_data["photo_id"]
 
-        # Extrai link e aplica Bitly
+        # Extrai link e traduz o restante do texto automaticamente para o português
         palavras = raw_text.split() if raw_text else []
         link_original = next((p for p in palavras if p.startswith("http")), "")
         link_final = encurtar_link_bitly(link_original) if link_original else ""
-        texto_limpo = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
+        
+        texto_sem_link = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
+        texto_traduzido = traduzir_para_portugues(texto_sem_link)
 
-        # Se escolheu IA, processa a copy
+        # Se escolheu IA, otimiza a copy traduzida
         if data == "mode_ai":
             try:
-                texto_limpo = processar_com_gemini(texto_limpo)
+                texto_traduzido = processar_com_gemini(texto_traduzido)
             except Exception:
-                pass # Se falhar a IA, mantém o texto original
+                pass 
 
         if link_final:
-            legenda_final = f"{texto_limpo}\n\n{link_final}".strip()
+            legenda_final = f"{texto_traduzido}\n\n{link_final}".strip()
         else:
-            legenda_final = texto_limpo
+            legenda_final = texto_traduzido
 
         # Salva o post final pronto para aprovação
         context.user_data['pending_post'] = {
@@ -156,7 +171,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Apaga a mensagem de escolha anterior e envia o preview formatado
         try:
             await query.message.delete()
         except Exception:
