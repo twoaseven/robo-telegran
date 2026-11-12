@@ -1,11 +1,8 @@
 import os
-import io
 import logging
 import requests
-from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from google import genai
 
 # Configuração de Logs
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -13,17 +10,13 @@ logger = logging.getLogger(__name__)
 
 # Leitura das Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BITLY_TOKEN = os.getenv("BITLY_TOKEN")
 CANAL_DESTINO = os.getenv("CANAL_DESTINO", "-1003975825755")  # Grupo de Rascunho
 
 # Whitelist de Segurança (IDs autorizados)
 WHITELIST = [5336222205, 6593135327]  # Cabral e Jade
 
-# Inicialização do Cliente Gemini
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-# Dicionário temporário para guardar postagens
+# Dicionário temporário para guardar postagens pendentes
 pending_posts = {}
 
 def encurtar_link_bitly(url_longa: str) -> str:
@@ -47,16 +40,6 @@ def encurtar_link_bitly(url_longa: str) -> str:
     
     return url_longa
 
-SYSTEM_PROMPT = (
-    "Atue como um copywriter especialista em canais de ofertas relâmpago no Telegram e WhatsApp. "
-    "Sua missão é criar uma copy CURTA, magnética e de ALTÍSSIMA CONVERSÃO.\n\n"
-    "REGRAS:\n"
-    "1. Use gatilhos fortes de escassez e urgência (ex: 'Preço bugado', 'Últimas unidades', 'Corre antes que acabe').\n"
-    "2. Foque no benefício principal em no máximo 2 linhas curtas.\n"
-    "3. Destaque o PREÇO em negrito e caixa alta.\n"
-    "4. Seja direto, sem introduções e sem enrolação. Entregue apenas o texto pronto para a legenda."
-)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in WHITELIST:
@@ -64,8 +47,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔥 **Drika Ajustada e Pronta!**\n\n"
-        "Envie a **FOTO** com o preço e o link na legenda para gerar a copy enxuta com link do Bitly."
+        "🔥 **Drika Modo Limpeza Ativa!**\n\n"
+        "Envie a **FOTO PRONTA** com o link na legenda. "
+        "Vou encurtar o link, mandar para o rascunho e **limpar o PV** assim que você aprovar."
     )
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,41 +64,27 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_photo and not raw_text:
         return
 
-    status_msg = await message.reply_text("⚡ Gerando copy e encurtando link...")
-
     try:
         # Extrai o link do texto/legenda para mandar pro Bitly
         palavras = raw_text.split() if raw_text else []
         link_original = next((p for p in palavras if p.startswith("http")), "")
         link_final = encurtar_link_bitly(link_original) if link_original else ""
 
-        contents = []
-        photo_file_id = None
+        # Remove o link longo original e adiciona o bloco limpo do Bitly
+        texto_limpo = raw_text.replace(link_original, "").strip() if link_original else (raw_text or "")
+        
+        if link_final:
+            legenda_final = f"{texto_limpo}\n\n{link_final}".strip()
+        else:
+            legenda_final = texto_limpo
 
-        if has_photo:
-            photo_obj = message.photo[-1]
-            photo_file_id = photo_obj.file_id
-            tg_file = await context.bot.get_file(photo_file_id)
-            img_bytes = await tg_file.download_as_bytearray()
-            pil_image = Image.open(io.BytesIO(img_bytes))
-            contents.append(pil_image)
-
-        user_instruction = f"{SYSTEM_PROMPT}\n\nDados da oferta fornecidos:\n{raw_text}"
-        contents.append(user_instruction)
-
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=contents,
-        )
-        copy_text = response.text.strip()
-
-        # Monta a legenda final unindo a copy da IA + o link encurtado limpo
-        legenda_final = f"{copy_text}\n\n{link_final}" if link_final else copy_text
+        photo_file_id = message.photo[-1].file_id if has_photo else None
 
         post_id = str(message.message_id)
         pending_posts[post_id] = {
             "text": legenda_final,
-            "photo_id": photo_file_id
+            "photo_id": photo_file_id,
+            "chat_id": message.chat_id
         }
 
         keyboard = [
@@ -125,8 +95,6 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await status_msg.delete()
-
         if photo_file_id:
             await message.reply_photo(photo=photo_file_id, caption=legenda_final, reply_markup=reply_markup)
         else:
@@ -134,7 +102,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Erro ao processar: {e}")
-        await status_msg.edit_text(f"❌ Erro ao processar. Detalhe: {e}")
+        await message.reply_text(f"❌ Erro ao processar mensagem. Detalhe: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,17 +121,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if post_data:
             try:
+                # 1. Envia para o canal de rascunho oficial
                 if post_data["photo_id"]:
                     await context.bot.send_photo(chat_id=CANAL_DESTINO, photo=post_data["photo_id"], caption=post_data["text"])
-                    await query.edit_message_caption(caption=f"{post_data['text']}\n\n✅ **Enviado para o Rascunho!**")
                 else:
                     await context.bot.send_message(chat_id=CANAL_DESTINO, text=post_data["text"])
-                    await query.edit_message_text(text=f"{post_data['text']}\n\n✅ **Enviado para o Rascunho!**")
                 
+                # 2. Deleta a mensagem de preview do chat privado (PV) para manter o histórico limpo
+                await query.message.delete()
+                
+                # Remove da memória temporária
                 del pending_posts[post_id]
             except Exception as e:
-                logger.error(f"Erro ao enviar para o canal: {e}")
-                await query.message.reply_text("❌ Erro ao enviar para o grupo de rascunho.")
+                logger.error(f"Erro ao enviar para o canal ou apagar mensagem: {e}")
+                await query.message.reply_text("❌ Erro ao processar o envio para o rascunho.")
         else:
             await query.message.reply_text("⚠️ Esta postagem expirou.")
 
@@ -171,10 +142,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post_id = data.split("_")[1]
         if post_id in pending_posts:
             del pending_posts[post_id]
-        if query.message.photo:
-            await query.edit_message_caption(caption="❌ **Postagem descartada.**")
-        else:
-            await query.edit_message_text(text="❌ **Postagem descartada.**")
+        
+        # Deleta a mensagem do PV se descartado também
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
