@@ -86,7 +86,8 @@ def montar_legenda_final(draft: dict) -> str:
     return "\n\n".join(partes).strip()
 
 
-def iniciar_novo_rascunho(context: ContextTypes.DEFAULT_TYPE):
+def iniciar_novo_rascunho(context: ContextTypes.DEFAULT_TYPE, preservar_msgs: list[int] | None = None):
+    msgs = list(preservar_msgs) if preservar_msgs else []
     context.user_data.clear()
     context.user_data["step"] = STEP_MEDIA_LINK
     context.user_data["draft"] = {
@@ -95,7 +96,7 @@ def iniciar_novo_rascunho(context: ContextTypes.DEFAULT_TYPE):
         "copy_pt": "",
         "specs_pt": "",
     }
-    context.user_data["temp_msg_ids"] = []
+    context.user_data["temp_msg_ids"] = msgs
 
 
 def registrar_msg_temp(context: ContextTypes.DEFAULT_TYPE, msg_id: int | None):
@@ -105,14 +106,21 @@ def registrar_msg_temp(context: ContextTypes.DEFAULT_TYPE, msg_id: int | None):
             msgs.append(msg_id)
 
 
-async def limpar_temporarias(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    msgs = context.user_data.get("temp_msg_ids", [])
-    for mid in msgs:
+async def limpar_mensagens(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ids_alvo: list[int] | None = None):
+    """Apaga mensagens registradas (ou uma lista específica) e remove da fila temporária."""
+    fila_atual = context.user_data.get("temp_msg_ids", [])
+    alvos = list(ids_alvo) if ids_alvo is not None else list(fila_atual)
+
+    for mid in alvos:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
-    context.user_data["temp_msg_ids"] = []
+
+    if ids_alvo is None:
+        context.user_data["temp_msg_ids"] = []
+    else:
+        context.user_data["temp_msg_ids"] = [m for m in fila_atual if m not in alvos]
 
 
 def teclado_cancelar() -> InlineKeyboardMarkup:
@@ -146,7 +154,7 @@ def teclado_confirmacao() -> InlineKeyboardMarkup:
     )
 
 
-async def enviar_preview_final(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+async def enviar_preview_final(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     draft = context.user_data.get("draft", {})
     legenda = montar_legenda_final(draft)
     context.user_data["step"] = STEP_CONFIRM
@@ -166,6 +174,10 @@ async def enviar_preview_final(update: Update, context: ContextTypes.DEFAULT_TYP
             text=legenda,
             reply_markup=teclado_confirmacao(),
         )
+
+    # Apaga tudo o que veio antes e deixa apenas a prévia atual na fila de limpeza final
+    anteriores = [m for m in context.user_data.get("temp_msg_ids", []) if m != enviada.message_id]
+    await limpar_mensagens(context, chat_id, anteriores)
     registrar_msg_temp(context, enviada.message_id)
 
 
@@ -174,6 +186,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in WHITELIST:
         await update.message.reply_text("⛔ Acesso restrito.")
         return
+
+    chat_id = update.message.chat_id
+    registrar_msg_temp(context, update.message.message_id)
+    await limpar_mensagens(context, chat_id)
 
     iniciar_novo_rascunho(context)
     msg = await update.message.reply_text(
@@ -194,7 +210,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registrar_msg_temp(context, message.message_id)
 
     if "step" not in context.user_data:
-        iniciar_novo_rascunho(context)
+        iniciar_novo_rascunho(context, preservar_msgs=[message.message_id])
 
     step = context.user_data.get("step")
     draft = context.user_data.setdefault(
@@ -236,7 +252,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             registrar_msg_temp(context, aviso.message_id)
             return
 
-        # Ambos recebidos -> avança para Etapa 2 (Copy)
+        # Etapa 1 concluída -> abre Etapa 2 e limpa histórico da Etapa 1
         context.user_data["step"] = STEP_COPY
         prox = await message.reply_text(
             "✅ Estrutura base montada com imagem e link.\n\n"
@@ -244,6 +260,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=teclado_cancelar(),
         )
         registrar_msg_temp(context, prox.message_id)
+        anteriores = [m for m in context.user_data.get("temp_msg_ids", []) if m != prox.message_id]
+        await limpar_mensagens(context, chat_id, anteriores)
 
     elif step == STEP_COPY:
         if not raw_text.strip():
@@ -254,11 +272,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             registrar_msg_temp(context, aviso.message_id)
             return
 
-        # Caso o usuário inclua o link junto na copy, remove o link duplicado da copy
         link_atual = draft.get("link", "")
         texto_copy = raw_text.replace(link_atual, "").strip() if link_atual else raw_text.strip()
         draft["copy_pt"] = traduzir_para_portugues(texto_copy)
 
+        # Etapa 2 concluída -> abre Etapa 3 e limpa histórico da Etapa 2
         context.user_data["step"] = STEP_SPECS
         prox = await message.reply_text(
             "✅ Copy encaixada na estrutura.\n\n"
@@ -267,6 +285,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=teclado_specs(),
         )
         registrar_msg_temp(context, prox.message_id)
+        anteriores = [m for m in context.user_data.get("temp_msg_ids", []) if m != prox.message_id]
+        await limpar_mensagens(context, chat_id, anteriores)
 
     elif step == STEP_SPECS:
         if raw_text.strip():
@@ -274,7 +294,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             draft["specs_pt"] = AVISO_SITE_MARKETPLACE
 
-        await enviar_preview_final(update, context, chat_id)
+        await enviar_preview_final(context, chat_id)
 
     elif step == STEP_CONFIRM:
         aviso = await message.reply_text(
@@ -295,10 +315,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     chat_id = query.message.chat_id
+    registrar_msg_temp(context, query.message.message_id)
 
     if data == "cancel_flow":
-        registrar_msg_temp(context, query.message.message_id)
-        await limpar_temporarias(context, chat_id)
+        await limpar_mensagens(context, chat_id)
         iniciar_novo_rascunho(context)
         msg = await context.bot.send_message(
             chat_id=chat_id,
@@ -310,8 +330,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "skip_specs":
         draft = context.user_data.setdefault("draft", {})
         draft["specs_pt"] = AVISO_SITE_MARKETPLACE
-        registrar_msg_temp(context, query.message.message_id)
-        await enviar_preview_final(update, context, chat_id)
+        await enviar_preview_final(context, chat_id)
 
     elif data == "send_draft":
         draft = context.user_data.get("draft", {})
@@ -335,16 +354,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=legenda,
                 )
 
-            registrar_msg_temp(context, query.message.message_id)
-            await limpar_temporarias(context, chat_id)
+            # Limpeza total do PV após envio ao canal de rascunho
+            await limpar_mensagens(context, chat_id)
             iniciar_novo_rascunho(context)
-
-            confirm = await context.bot.send_message(
-                chat_id=chat_id,
-                text="✅ Enviado para o rascunho! Pronto para o próximo — envie **IMAGEM** e **LINK**.",
-                reply_markup=teclado_cancelar(),
-            )
-            registrar_msg_temp(context, confirm.message_id)
 
         except Exception as e:
             logger.error(f"Erro ao enviar para o canal de rascunho: {e}")
