@@ -1,7 +1,2 @@
-python-telegram-bot[webhooks]
-google-genai
-requests
+python-telegram-bot
 deep-translator
-pillow
-beautifulsoup4
-flask
